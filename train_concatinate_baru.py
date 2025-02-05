@@ -3,16 +3,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import keras
-from keras.models import Model
+from keras.models import Sequential
 from keras.optimizers import Adam
-from keras.layers import Conv2D, Dropout, Flatten, Dense, BatchNormalization, Reshape, Multiply, GlobalAveragePooling2D, Multiply, Reshape, Concatenate, Input
+from keras.layers import Conv2D, Dropout, Flatten, Dense, BatchNormalization, InputLayer, Attention, Reshape, Multiply, Input, Concatenate, Reshape, Multiply
 from sklearn.utils import shuffle
 from sklearn.model_selection import train_test_split
 from keras.callbacks import EarlyStopping
 import cv2
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-
 
 # Load data only with existing columns
 columns = ['image_filename', 'linear_velocity', 'angular_velocity']
@@ -21,7 +20,6 @@ data = pd.read_csv('data_filtered.csv', names=columns)
 # Clean angular velocity values
 data['angular_velocity'] = pd.to_numeric(data['angular_velocity'], errors='coerce')
 data.dropna(subset=['angular_velocity'], inplace=True)
-
 
 # Filter data for each camera
 camera_right_data = data[data['image_filename'].str.contains("camera_right")]
@@ -70,7 +68,7 @@ def load_img_angular_velocity(datadir, df):
         angle = float(indexed_data['angular_velocity'])
         original_angular_velocity.append(angle)
 
-        if "camera_belok" in image_file and "cepat" in image_file:
+        if "camera_belok_cepat" in image_file:
             if angle <= -0.3:
                 angle += -0.05
             elif angle >= 0.3:
@@ -202,63 +200,58 @@ def img_generator(image_paths, angular_velocities, linear_velocities, batch_size
             # Yield both the processed images and angular velocities (targets)
             yield [np.array(images), np.array(velocities)], np.array(batch_angles)
 
-def bc():
-    # Input for image
-    image_input = Input(shape=(66, 200, 3), name="image_input")
-    
-    # Convolutional layers
+# Define CIL model with attention mechanism
+def behavior_cloning():
+    # Input untuk gambar
+    image_input = Input(shape=(66, 200, 3), name='image_input')
     x = Conv2D(32, kernel_size=(5, 5), strides=(2, 2), padding='same', activation='relu')(image_input)
     x = BatchNormalization()(x)
-    
+
     for _ in range(5):
         kernel_size = (3, 3)
         stride = (2, 2) if (_ % 2 == 0) else (1, 1)
         x = Conv2D(64, kernel_size=kernel_size, strides=stride, padding='same', activation='relu')(x)
         x = BatchNormalization()(x)
 
-    # Spatial Attention
-    spatial_attention = Conv2D(1, kernel_size=(3, 3), activation='sigmoid', padding='same')(x)
-    spatial_output = Multiply()([x, spatial_attention])
-    
-    # Channel Attention
-    gap = GlobalAveragePooling2D()(spatial_output)
-    channel_attention = Dense(64, activation='relu')(gap)
-    channel_attention = Dense(64, activation='sigmoid')(channel_attention)
-    channel_attention = Reshape((1, 1, 64))(channel_attention)
-    model_output = Multiply()([spatial_output, channel_attention])
-    
-    # Flatten the feature maps
-    model_output = Flatten()(model_output)
+    # Mekanisme Attention
+    attention = Conv2D(64, kernel_size=(3, 3), activation='relu', padding='same')(x)
+    attention = Flatten()(attention)
+    attention = Dense(128, activation='relu')(attention)
+    attention = Dense(64, activation='relu')(attention)
+    attention = Dense(1, activation='sigmoid')(attention)
+    attention = Reshape((1, 1, 1))(attention)
 
-    # Input for linear velocity
-    velocity_input = Input(shape=(1,), name="velocity_input")
+    # Terapkan attention
+    x = Multiply()([x, attention])
+    x = Flatten()(x)
 
-    # Concatenate image features with velocity input
-    combined = Concatenate()([model_output, velocity_input])
+    # Input untuk kecepatan linear
+    velocity_input = Input(shape=(1,), name='velocity_input')
+    concatenated = Concatenate()([x, velocity_input])
 
-    # Fully connected layers
-    combined = Dense(128, activation='relu')(combined)
-    combined = Dropout(0.3)(combined)
-    combined = BatchNormalization()(combined)
-    combined = Dense(64, activation='relu')(combined)
-    combined = Dropout(0.3)(combined)
-    combined = BatchNormalization()(combined)
-    
-    # Output layer
-    output = Dense(1, name="output")(combined)
+    x = Dense(128, activation='relu')(concatenated)
+    x = Dropout(0.3)(x)
+    x = BatchNormalization()(x)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = BatchNormalization()(x)
+    output = Dense(1, name='angular_velocity_output')(x)
 
-    # Compile the model
-    model = Model(inputs=[image_input, velocity_input], outputs=output)
+    # Gabungkan model
+    model = keras.Model(inputs=[image_input, velocity_input], outputs=output)
+
+    # Kompilasi model
     optimizer = Adam(learning_rate=1e-4)
     model.compile(loss='mse', optimizer=optimizer)
 
     return model
 
-model = bc()
+model = behavior_cloning()
 print(model.summary())
 
 early_stopping = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
 
+# Train model with generator
 history = model.fit(
     img_generator(x_train, y_train, linear_train, batch_size=32),
     validation_data=img_generator(x_valid, y_valid, linear_valid, batch_size=32),
@@ -270,29 +263,6 @@ history = model.fit(
 
 # Save the model after training
 model.save('model.h5')
-
-# Ambil beberapa sampel dari validasi untuk ditampilkan
-sample_images, sample_velocities = x_valid[:10], linear_valid[:10]
-predictions, attention_values = model.predict([sample_images, sample_velocities])
-
-# # Tampilkan gambar dan nilai attention
-for i in range(len(sample_images)):
-    plt.figure(figsize=(10, 5))
-
-    # Plot gambar input
-    plt.subplot(1, 2, 1)
-    img = mpimg.imread(sample_images[i])
-    plt.imshow(img)
-    plt.title("Input Image")
-
-    # Plot nilai attention
-    plt.subplot(1, 2, 2)
-    plt.bar([0], [attention_values[i]], color='orange')
-    plt.ylim(0, 1)
-    plt.title("Attention Value")
-
-    plt.show()
-
 
 # Adjust steps to include all data
 steps_train = (len(x_train) + 64 - 1) // 64
